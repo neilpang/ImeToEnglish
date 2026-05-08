@@ -2,7 +2,7 @@
 
 一个常驻系统托盘的 Windows 小工具,自动把输入法切回英文,并在敲键盘时隐藏鼠标。
 
-[![Build & Release](https://github.com/OWNER/REPO/actions/workflows/release.yml/badge.svg)](https://github.com/OWNER/REPO/actions/workflows/release.yml)
+[![Build & Release](https://github.com/neilpang/ImeToEnglish/actions/workflows/release.yml/badge.svg)](https://github.com/neilpang/ImeToEnglish/actions/workflows/release.yml)
 
 ## 功能
 
@@ -63,8 +63,8 @@
 需要: [.NET 9 SDK](https://dotnet.microsoft.com/download/dotnet/9.0) (或更新)
 
 ```bash
-git clone https://github.com/OWNER/REPO.git
-cd REPO
+git clone https://github.com/neilpang/ImeToEnglish.git
+cd ImeToEnglish
 dotnet publish -c Release -r win-x64 --self-contained false -o publish
 ```
 
