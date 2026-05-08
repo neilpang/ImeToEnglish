@@ -1,0 +1,61 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore
+        run: dotnet restore ImeToEnglish.csproj
+
+      - name: Publish (framework-dependent, win-x64)
+        run: dotnet publish ImeToEnglish.csproj -c Release -r win-x64 --self-contained false --no-restore -o publish
+
+      - name: Package zip
+        id: pkg
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $version = $env:GITHUB_REF -replace 'refs/tags/',''
+          } else {
+            $version = "dev-$(git rev-parse --short HEAD)"
+          }
+          $name = "ImeToEnglish-$version-win-x64.zip"
+          Compress-Archive -Path publish/* -DestinationPath $name -Force
+          echo "asset=$name" >> $env:GITHUB_OUTPUT
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImeToEnglish-${{ steps.pkg.outputs.version }}
+          path: ${{ steps.pkg.outputs.asset }}
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.pkg.outputs.asset }}
+          generate_release_notes: true
+          draft: false
+          prerelease: false
