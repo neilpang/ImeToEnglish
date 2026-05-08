@@ -24,11 +24,8 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
-      - name: Restore
-        run: dotnet restore ImeToEnglish.csproj
-
       - name: Publish (framework-dependent, win-x64)
-        run: dotnet publish ImeToEnglish.csproj -c Release -r win-x64 --self-contained false --no-restore -o publish
+        run: dotnet publish ImeToEnglish.csproj -c Release -r win-x64 --self-contained false -o publish
 
       - name: Package zip
         id: pkg
