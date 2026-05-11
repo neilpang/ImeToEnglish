@@ -151,7 +151,16 @@ internal sealed class TrayApp : ApplicationContext
         catch { return; }
 
         IntPtr hwnd = GetForegroundWindow();
-        if (hwnd != IntPtr.Zero) SwitchToEnglish(hwnd);
+        if (hwnd == IntPtr.Zero) return;
+
+        // Coalesce with the foreground hook through the deferred timer.
+        // On an app switch both paths fire; calling SwitchToEnglish here
+        // immediately races the IME's own focus-change state sync — the
+        // readback can still show NATIVE and trip the Shift fallback,
+        // which then toggles a visible EN state to CN.
+        _pendingHwnd = hwnd;
+        _deferTimer.Stop();
+        _deferTimer.Start();
     }
 
     private static bool IsChromiumAddressBar(AutomationElement element)
@@ -202,6 +211,13 @@ internal sealed class TrayApp : ApplicationContext
         {
             IntPtr imeWnd = ImmGetDefaultIMEWnd(hwnd);
             if (imeWnd == IntPtr.Zero) return;
+
+            // Bail if already alphanumeric. Otherwise SET+GET below can race
+            // an IME state transition, leave the readback NATIVE and fire
+            // the Shift fallback, toggling a visible EN state to CN.
+            IntPtr current = SendMessage(imeWnd, WM_IME_CONTROL,
+                new IntPtr(IMC_GETCONVERSIONMODE), IntPtr.Zero);
+            if ((current.ToInt32() & IME_CMODE_NATIVE) == 0) return;
 
             SendMessage(imeWnd, WM_IME_CONTROL,
                 new IntPtr(IMC_SETCONVERSIONMODE),
