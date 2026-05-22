@@ -29,19 +29,21 @@ internal sealed class TrayApp : ApplicationContext
     private readonly WinEventDelegate _proc;
     private readonly IntPtr _hook;
     private readonly IntPtr _enLayout;
-    private readonly System.Windows.Forms.Timer _deferTimer;
+    private readonly System.Threading.Timer _deferTimer;
     private readonly AutomationFocusChangedEventHandler _uiaFocusHandler;
     private readonly CursorHider _cursorHider = new();
     private IntPtr _pendingHwnd;
     private IntPtr _iconHandle;
     private bool _enabled = true;
+    private IntPtr _lastSwitchHwnd;
+    private long _lastSwitchTicks;
 
     private const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
     private const uint WINEVENT_OUTOFCONTEXT = 0x0000;
     private const uint WM_IME_CONTROL = 0x0283;
     private const uint WM_INPUTLANGCHANGEREQUEST = 0x0050;
-    private const int IMC_SETCONVERSIONMODE = 0x0002;
     private const int IMC_GETCONVERSIONMODE = 0x0001;
+    private const int IMC_SETCONVERSIONMODE = 0x0002;
     private const int IME_CMODE_ALPHANUMERIC = 0x0000;
     private const int IME_CMODE_NATIVE = 0x0001;
     private const uint INPUT_KEYBOARD = 1;
@@ -54,6 +56,10 @@ internal sealed class TrayApp : ApplicationContext
 
     public TrayApp()
     {
+        Logger.Enabled = true;
+        Logger.Reset();
+        Logger.Log("TrayApp ctor");
+
         _enLayout = LoadKeyboardLayout("00000409", KLF_ACTIVATE);
 
         _proc = OnForeground;
@@ -61,14 +67,18 @@ internal sealed class TrayApp : ApplicationContext
             EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
             IntPtr.Zero, _proc, 0, 0, WINEVENT_OUTOFCONTEXT);
 
-        _deferTimer = new System.Windows.Forms.Timer { Interval = 120 };
-        _deferTimer.Tick += (_, _) =>
+        // System.Threading.Timer (not WinForms.Timer): UIA focus events
+        // arrive on a UIA RPC thread, and WinForms.Timer.Start/Stop from
+        // a non-UI thread silently fails to schedule WM_TIMER. Change()
+        // is thread-safe, so this works regardless of caller thread.
+        _deferTimer = new System.Threading.Timer(_ =>
         {
-            _deferTimer.Stop();
             IntPtr hwnd = _pendingHwnd;
-            if (hwnd != IntPtr.Zero && hwnd == GetForegroundWindow())
-                SwitchToEnglish(hwnd);
-        };
+            IntPtr fg = GetForegroundWindow();
+            bool match = hwnd != IntPtr.Zero && hwnd == fg;
+            Logger.Log($"TIMER tick pending=0x{(long)hwnd:X} fg=0x{(long)fg:X} match={match}");
+            if (match) SwitchToEnglish(hwnd);
+        }, null, System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
 
         _uiaFocusHandler = OnUiaFocusChanged;
         try
@@ -108,7 +118,44 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(autoStart);
 
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Exit", null, (_, _) => ExitThread());
+
+        var diagLog = new ToolStripMenuItem("Diagnostic log")
+        {
+            Checked = Logger.Enabled,
+            CheckOnClick = true,
+        };
+        diagLog.CheckedChanged += (_, _) =>
+        {
+            Logger.Enabled = diagLog.Checked;
+            if (diagLog.Checked) Logger.Reset();
+        };
+        menu.Items.Add(diagLog);
+
+        menu.Items.Add("Open log file", null, (_, _) =>
+        {
+            try { Process.Start(new ProcessStartInfo(Logger.FilePath) { UseShellExecute = true }); }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Cannot open log: " + ex.Message,
+                    "ImeToEnglish", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        });
+
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Exit", null, (_, _) =>
+        {
+            Logger.Log("Exit clicked");
+            // Fast-exit: skip ApplicationContext.Dispose, which calls
+            // Automation.RemoveAutomationFocusChangedEventHandler -- that
+            // API can block 2-5 seconds. While it blocks, the low-level
+            // mouse/keyboard hooks are still installed, so every input
+            // event waits on the blocked thread until LowLevelHooksTimeout
+            // fires, making the whole UI feel frozen. Unhook first, then
+            // exit hard.
+            _cursorHider.Dispose();
+            _icon!.Visible = false;
+            Environment.Exit(0);
+        });
 
         _icon = new NotifyIcon
         {
@@ -132,35 +179,51 @@ internal sealed class TrayApp : ApplicationContext
         IntPtr hWinEventHook, uint eventType, IntPtr hwnd,
         int idObject, int idChild, uint dwEventThread, uint dwmsEventTime)
     {
+        Logger.Log($"FG hwnd=0x{(long)hwnd:X} idObj={idObject} proc={GetProcName(hwnd)} enabled={_enabled}");
         if (!_enabled || hwnd == IntPtr.Zero) return;
         if (idObject != OBJID_WINDOW) return;
         _pendingHwnd = hwnd;
-        _deferTimer.Stop();
-        _deferTimer.Start();
+        _deferTimer.Change(120, System.Threading.Timeout.Infinite);
     }
 
     private void OnUiaFocusChanged(object? sender, AutomationFocusChangedEventArgs e)
     {
-        if (!_enabled) return;
-        if (sender is not AutomationElement element) return;
+        if (!_enabled) { Logger.Log("UIA (feature disabled)"); return; }
+        if (sender is not AutomationElement element) { Logger.Log("UIA sender not AutomationElement"); return; }
 
+        string ctType = "?", procName = "?";
+        bool isAddr;
         try
         {
-            if (!IsChromiumAddressBar(element)) return;
+            ctType = element.Current.ControlType.ProgrammaticName;
+            try
+            {
+                using var p = Process.GetProcessById(element.Current.ProcessId);
+                procName = p.ProcessName;
+            }
+            catch { }
+            isAddr = IsChromiumAddressBar(element);
         }
-        catch { return; }
+        catch (Exception ex)
+        {
+            Logger.Log($"UIA exception: {ex.GetType().Name}: {ex.Message}");
+            return;
+        }
+
+        Logger.Log($"UIA ctType={ctType} proc={procName} isAddrBar={isAddr}");
+        if (!isAddr) return;
 
         IntPtr hwnd = GetForegroundWindow();
-        if (hwnd == IntPtr.Zero) return;
+        if (hwnd == IntPtr.Zero) { Logger.Log("UIA addrBar but foreground=0"); return; }
+
+        Logger.Log($"UIA addrBar -> defer 120ms hwnd=0x{(long)hwnd:X}");
 
         // Coalesce with the foreground hook through the deferred timer.
-        // On an app switch both paths fire; calling SwitchToEnglish here
-        // immediately races the IME's own focus-change state sync — the
-        // readback can still show NATIVE and trip the Shift fallback,
-        // which then toggles a visible EN state to CN.
+        // Each Change() resets the due time, so a rapid FG+UIA pair
+        // collapses into one SwitchToEnglish. A late event past the
+        // coalesce window is caught by the per-hwnd cooldown.
         _pendingHwnd = hwnd;
-        _deferTimer.Stop();
-        _deferTimer.Start();
+        _deferTimer.Change(120, System.Threading.Timeout.Infinite);
     }
 
     private static bool IsChromiumAddressBar(AutomationElement element)
@@ -198,45 +261,75 @@ internal sealed class TrayApp : ApplicationContext
 
     private void SwitchToEnglish(IntPtr hwnd)
     {
-        if (hwnd == IntPtr.Zero) return;
+        if (hwnd == IntPtr.Zero) { Logger.Log("SWITCH hwnd=0 skip"); return; }
 
         uint threadId = GetWindowThreadProcessId(hwnd, out _);
         IntPtr currentLayout = GetKeyboardLayout(threadId);
         int langId = (int)((long)currentLayout & 0xFFFF);
         int primaryLang = langId & 0x3FF;
+        Logger.Log($"SWITCH hwnd=0x{(long)hwnd:X} proc={GetProcName(hwnd)} layout=0x{langId:X4} primaryLang=0x{primaryLang:X}");
 
-        if (primaryLang == LANG_ENGLISH) return;
+        if (primaryLang == LANG_ENGLISH) { Logger.Log("SWITCH already EN layout, noop"); return; }
 
         if (primaryLang == LANG_CHINESE)
         {
             IntPtr imeWnd = ImmGetDefaultIMEWnd(hwnd);
-            if (imeWnd == IntPtr.Zero) return;
+            if (imeWnd == IntPtr.Zero) { Logger.Log("SWITCH no IME window, skip"); return; }
 
-            // Bail if already alphanumeric. Otherwise SET+GET below can race
-            // an IME state transition, leave the readback NATIVE and fire
-            // the Shift fallback, toggling a visible EN state to CN.
-            IntPtr current = SendMessage(imeWnd, WM_IME_CONTROL,
-                new IntPtr(IMC_GETCONVERSIONMODE), IntPtr.Zero);
-            if ((current.ToInt32() & IME_CMODE_NATIVE) == 0) return;
+            // Cooldown: foreground hook + UIA can both fire for the same
+            // focus change. Without this a late event would re-process and
+            // potentially toggle EN back to CN before state settles.
+            long now = Environment.TickCount64;
+            if (hwnd == _lastSwitchHwnd && (now - _lastSwitchTicks) < 800)
+            {
+                Logger.Log($"SWITCH cooldown ({now - _lastSwitchTicks}ms < 800ms) skip");
+                return;
+            }
+            _lastSwitchHwnd = hwnd;
+            _lastSwitchTicks = now;
 
+            // Step 1: try WM_IME_CONTROL SET. Works for legacy IMM IMEs
+            // (deterministic to ALPHANUMERIC). No-op for modern TSF IMEs
+            // like Microsoft Pinyin.
             SendMessage(imeWnd, WM_IME_CONTROL,
                 new IntPtr(IMC_SETCONVERSIONMODE),
                 new IntPtr(IME_CMODE_ALPHANUMERIC));
 
+            // Step 2: read back. If SET took (legacy IMEs), mode will be
+            // ALPHANUMERIC -- we're done. If readback still says NATIVE
+            // (TSF IMEs where SET is a no-op), Shift is the fallback.
             IntPtr modeResult = SendMessage(imeWnd, WM_IME_CONTROL,
                 new IntPtr(IMC_GETCONVERSIONMODE), IntPtr.Zero);
             int mode = modeResult.ToInt32();
+            Logger.Log($"SWITCH post-SET mode=0x{mode:X}");
             if ((mode & IME_CMODE_NATIVE) != 0)
             {
+                Logger.Log("SWITCH SET did not take, sending Shift");
                 SendShiftTap();
+            }
+            else
+            {
+                Logger.Log("SWITCH SET took, no Shift needed");
             }
             return;
         }
 
         if (_enLayout != IntPtr.Zero)
         {
+            Logger.Log("SWITCH non-CN layout, posting WM_INPUTLANGCHANGEREQUEST");
             PostMessage(hwnd, WM_INPUTLANGCHANGEREQUEST, IntPtr.Zero, _enLayout);
         }
+    }
+
+    private static string GetProcName(IntPtr hwnd)
+    {
+        try
+        {
+            GetWindowThreadProcessId(hwnd, out uint pid);
+            using var p = Process.GetProcessById((int)pid);
+            return p.ProcessName;
+        }
+        catch { return "?"; }
     }
 
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -365,9 +458,6 @@ internal sealed class TrayApp : ApplicationContext
     private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll")]
-    private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
-
-    [DllImport("user32.dll")]
     private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
 
     [StructLayout(LayoutKind.Sequential)]
@@ -425,6 +515,9 @@ internal sealed class TrayApp : ApplicationContext
 
     [DllImport("imm32.dll")]
     private static extern IntPtr ImmGetDefaultIMEWnd(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 }
 
 internal sealed class CursorHider : IDisposable
@@ -592,4 +685,33 @@ internal sealed class CursorHider : IDisposable
 
     [DllImport("user32.dll")]
     private static extern bool SystemParametersInfo(uint uiAction, uint uiParam, IntPtr pvParam, uint fWinIni);
+}
+
+internal static class Logger
+{
+    private static readonly object _lock = new();
+    public static readonly string FilePath =
+        System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ImeToEnglish.log");
+    public static bool Enabled;
+
+    public static void Reset()
+    {
+        try
+        {
+            System.IO.File.WriteAllText(FilePath,
+                $"--- session started {DateTime.Now:yyyy-MM-dd HH:mm:ss} pid={Environment.ProcessId} ---{Environment.NewLine}");
+        }
+        catch { }
+    }
+
+    public static void Log(string msg)
+    {
+        if (!Enabled) return;
+        try
+        {
+            string line = $"[{DateTime.Now:HH:mm:ss.fff}] {msg}{Environment.NewLine}";
+            lock (_lock) { System.IO.File.AppendAllText(FilePath, line); }
+        }
+        catch { }
+    }
 }

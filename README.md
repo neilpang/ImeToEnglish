@@ -41,7 +41,7 @@
 
 ### 2. 下载本工具
 
-到本仓库的 [Releases](../../releases) 页面下载 `ImeToEnglish-vX.Y.Z-win-x64.zip`,解压到一个固定位置 (例如 `C:\Tools\ImeToEnglish\`)。
+到本仓库的 [Releases](../../releases) 页面下载 `ImeToEnglish-vX.Y.Z-win-x64.exe`,放到一个固定位置 (例如 `C:\Tools\ImeToEnglish\`)。
 
 ### 3. 运行
 
@@ -65,10 +65,10 @@
 ```bash
 git clone https://github.com/neilpang/ImeToEnglish.git
 cd ImeToEnglish
-dotnet publish -c Release -r win-x64 --self-contained false -o publish
+dotnet publish -c Release -r win-x64 -o publish
 ```
 
-输出目录 `publish/` 里就是 4 个小文件 (~190 KB),双击 `ImeToEnglish.exe` 即可。
+输出目录 `publish/` 里就一个 `ImeToEnglish.exe` (~230 KB,framework-dependent 单文件,PDB 嵌入),双击即可运行。
 
 ## 工作原理简述
 

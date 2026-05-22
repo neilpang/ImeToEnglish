@@ -24,10 +24,10 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
-      - name: Publish (framework-dependent, win-x64)
-        run: dotnet publish ImeToEnglish.csproj -c Release -r win-x64 --self-contained false -o publish
+      - name: Publish (framework-dependent single-file, win-x64)
+        run: dotnet publish ImeToEnglish.csproj -c Release -r win-x64 -o publish
 
-      - name: Package zip
+      - name: Rename exe with version
         id: pkg
         shell: pwsh
         run: |
@@ -36,8 +36,8 @@ jobs:
           } else {
             $version = "dev-$(git rev-parse --short HEAD)"
           }
-          $name = "ImeToEnglish-$version-win-x64.zip"
-          Compress-Archive -Path publish/* -DestinationPath $name -Force
+          $name = "ImeToEnglish-$version-win-x64.exe"
+          Move-Item publish/ImeToEnglish.exe $name -Force
           echo "asset=$name" >> $env:GITHUB_OUTPUT
           echo "version=$version" >> $env:GITHUB_OUTPUT
 
